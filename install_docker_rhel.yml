@@ -1,0 +1,181 @@
+---
+- name: Install Docker on AlmaLinux/RHEL
+  hosts: alma
+  become: true
+  tasks:
+    - name: Update all packages
+      dnf:
+        name: '*'
+        state: latest
+        update_cache: yes
+
+    - name: Install required packages
+      dnf:
+        name:
+          - nano
+          - wget
+          - git
+          - unzip
+          - qemu-guest-agent
+        state: present
+
+    - name: Add Docker repository
+      command: dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+      args:
+        creates: /etc/yum.repos.d/docker-ce.repo
+
+    - name: Install Docker packages
+      dnf:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: latest
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add current user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Test Docker installation
+      command: docker run hello-world
+      register: test_output
+      changed_when: false
+
+    - name: Display test output
+      debug:
+        var: test_output.stdout_lines
+
+    - name: Create Nextcloud directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      with_items:
+        - /home/sasho/cloud/data
+        - /home/sasho/cloud/config
+        - /home/sasho/cloud/custom_apps
+        - /home/sasho/cloud/themes
+        - /home/sasho/cloud/logs
+        - /home/sasho/cloud/db
+
+    - name: Set www-data ownership for Nextcloud directories
+      file:
+        path: "{{ item }}"
+        owner: 33
+        group: 33
+        recurse: yes
+      with_items:
+        - /home/sasho/cloud/data
+        - /home/sasho/cloud/config
+        - /home/sasho/cloud/custom_apps
+        - /home/sasho/cloud/themes
+        - /home/sasho/cloud/logs
+
+    - name: Set permissions for data directory
+      file:
+        path: /home/sasho/cloud/data
+        mode: '0770'
+        recurse: yes
+
+    - name: Create docker-compose.yaml for Nextcloud
+      copy:
+        dest: /home/sasho/cloud/compose.yaml
+        content: |
+          version: '3.8'
+
+          services:
+            nextcloud:
+              image: nextcloud:latest
+              container_name: cloud
+              restart: always
+              ports:
+                - "80:80"
+                - "443:443"
+              depends_on:
+                - db
+                - redis
+              volumes:
+                - /home/sasho/cloud/data:/var/www/html/data
+                - /home/sasho/cloud/config:/var/www/html/config
+                - /home/sasho/cloud/custom_apps:/var/www/html/custom_apps
+                - /home/sasho/cloud/themes:/var/www/html/themes
+                - /home/sasho/cloud/logs:/var/www/html/data/logs
+                - /home/sasho/cloud/apache.conf:/etc/apache2/sites-available/000-default.conf
+              environment:
+                POSTGRES_HOST: db
+                POSTGRES_DB: nextcloud
+                POSTGRES_USER: nextcloud
+                POSTGRES_PASSWORD: 09876#Pmf
+                REDIS_HOST: redis
+                NEXTCLOUD_ADMIN_USER: admin
+                NEXTCLOUD_ADMIN_PASSWORD: Skopje#091
+                TRUSTED_PROXIES: 192.168.100.35  # Proxy IP (Nginx Proxy Manager)
+                OVERWRITEPROTOCOL: https
+                APACHE_SERVER_NAME: cloud.fixsys.org
+                NEXTCLOUD_TRUSTED_DOMAINS: |
+                  cloud.fixsys.org
+                  192.168.100.40  # Server IP
+              networks:
+                - proxy_network
+              dns:
+                - 8.8.8.8
+                - 1.1.1.1
+              labels:
+                - "traefik.enable=true"
+                - "traefik.http.routers.cloud.rule=Host(`cloud.fixsys.org`)"
+                - "traefik.http.routers.cloud.entrypoints=websecure"
+                - "traefik.http.routers.cloud.tls.certresolver=letsencrypt"
+
+            db:
+              image: postgres:16
+              container_name: cloud-db
+              restart: always
+              volumes:
+                - /home/sasho/cloud/db:/var/lib/postgresql/data
+              environment:
+                POSTGRES_DB: nextcloud
+                POSTGRES_USER: nextcloud
+                POSTGRES_PASSWORD: 09876#Pmf
+              networks:
+                - proxy_network
+
+            redis:
+              image: redis:alpine
+              container_name: cloud-redis
+              restart: always
+              networks:
+                - proxy_network
+
+            cron:
+              image: nextcloud:latest
+              container_name: cloud-cron
+              restart: always
+              volumes:
+                - /home/sasho/cloud/data:/var/www/html/data
+                - /home/sasho/cloud/config:/var/www/html/config
+                - /home/sasho/cloud/custom_apps:/var/www/html/custom_apps
+                - /home/sasho/cloud/themes:/var/www/html/themes
+                - /home/sasho/cloud/logs:/var/www/html/data/logs
+              entrypoint: /cron.sh
+              depends_on:
+                - db
+                - redis
+              networks:
+                - proxy_network
+              dns:
+                - 8.8.8.8
+                - 1.1.1.1
+
+          networks:
+            proxy_network:
+              driver: bridge
