@@ -1,8 +1,8 @@
 ---
 
-- host: all
+- hosts: all
   become: true
-  tasks:
+  pre_tasks:
 
   - name: install updates (Ubuntu)
     apt:
@@ -10,15 +10,14 @@
       update_cache: yes
     when: ansible_os_family == "Ubuntu"
 
--host: test
+- hosts: docker1
   become: true
   tasks:
-
-  - name: install web management (Cockpit)
-    apt:
-      name: 
-        - cockpit
-        - cockpit-files
-        - cockpit-dockermanager
-      state: latest
-    when: ansible_os_family == "Ubuntu"
+    - name: Install Cockpit and related packages (Ubuntu)
+      apt:
+        name:
+          - cockpit
+          - cockpit-navigator
+          - cockpit-dockermanager
+        state: latest
+      when: ansible_os_family
