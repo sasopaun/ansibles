@@ -98,9 +98,9 @@
               ErrorLog ${APACHE_LOG_DIR}/error.log
               CustomLog ${APACHE_LOG_DIR}/access.log combined
           </VirtualHost>
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
         mode: '0664'
-        owner: sasho
-        group: sasho
 
     - name: Create docker-compose.yaml for Nextcloud
       copy:
