@@ -62,7 +62,9 @@
       file:
         path: "{{ item }}"
         state: directory
-        mode: '0755'
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
       with_items:
         - /home/sasho/cloud/data
         - /home/sasho/cloud/config
