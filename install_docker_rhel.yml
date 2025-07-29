@@ -3,8 +3,11 @@
   hosts: alma
   become: true
   gather_facts: true
+  vars_files:
+    - vault.yml
   vars:
     docker_user: "{{ ansible_user | default('sasho') }}"
+    nextcloud_data_path: "/home/{{ docker_user }}/cloud"
   tasks:
     - name: Update all packages
       dnf:
@@ -58,46 +61,54 @@
       debug:
         var: test_output.stdout_lines
 
-    - name: Create Nextcloud directories
+    - name: Set up Nextcloud directory structure with proper permissions
       file:
-        path: "{{ item }}"
+        path: "{{ item.path }}"
         state: directory
         owner: "{{ item.owner }}"
         group: "{{ item.group }}"
         mode: "{{ item.mode }}"
       with_items:
-        - /home/sasho/cloud/data
-        - /home/sasho/cloud/config
-        - /home/sasho/cloud/custom_apps
-        - /home/sasho/cloud/themes
-        - /home/sasho/cloud/logs
-        - /home/sasho/cloud/db
+        - { path: '{{ nextcloud_data_path }}', owner: '{{ docker_user }}', group: '{{ docker_user }}', mode: '0775' }
+        - { path: '{{ nextcloud_data_path }}/config', owner: '33', group: '33', mode: '0775' }
+        - { path: '{{ nextcloud_data_path }}/custom_apps', owner: '33', group: '33', mode: '0775' }
+        - { path: '{{ nextcloud_data_path }}/data', owner: '33', group: '33', mode: '0770' }
+        - { path: '{{ nextcloud_data_path }}/db', owner: '999', group: '{{ docker_user }}', mode: '0700' }
+        - { path: '{{ nextcloud_data_path }}/logs', owner: '33', group: '33', mode: '0775' }
+        - { path: '{{ nextcloud_data_path }}/themes', owner: '33', group: '33', mode: '0775' }
 
-    - name: Set www-data ownership for Nextcloud directories
-      file:
-        path: "{{ item }}"
-        owner: 33
-        group: 33
-        recurse: yes
-      with_items:
-        - /home/sasho/cloud/data
-        - /home/sasho/cloud/config
-        - /home/sasho/cloud/custom_apps
-        - /home/sasho/cloud/themes
-        - /home/sasho/cloud/logs
+    - name: Create apache.conf file
+      copy:
+        dest: "{{ nextcloud_data_path }}/apache.conf"
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+        mode: '0664'
+        content: |
+          ServerName {{ domain_name }}
 
-    - name: Set permissions for data directory
-      file:
-        path: /home/sasho/cloud/data
-        mode: '0770'
-        recurse: yes
+          <VirtualHost *:80>
+              ServerName {{ domain_name }}
+              DocumentRoot /var/www/html
+
+              <Directory /var/www/html>
+                  AllowOverride All
+                  Require all granted
+              </Directory>
+
+              ErrorLog ${APACHE_LOG_DIR}/error.log
+              CustomLog ${APACHE_LOG_DIR}/access.log combined
+          </VirtualHost>
+        mode: '0664'
+        owner: sasho
+        group: sasho
 
     - name: Create docker-compose.yaml for Nextcloud
       copy:
-        dest: /home/sasho/cloud/compose.yaml
+        dest: "{{ nextcloud_data_path }}/compose.yaml"
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+        mode: '0664'
         content: |
-          version: '3.8'
-
           services:
             nextcloud:
               image: nextcloud:latest
@@ -110,26 +121,26 @@
                 - db
                 - redis
               volumes:
-                - /home/sasho/cloud/data:/var/www/html/data
-                - /home/sasho/cloud/config:/var/www/html/config
-                - /home/sasho/cloud/custom_apps:/var/www/html/custom_apps
-                - /home/sasho/cloud/themes:/var/www/html/themes
-                - /home/sasho/cloud/logs:/var/www/html/data/logs
-                - /home/sasho/cloud/apache.conf:/etc/apache2/sites-available/000-default.conf
+                - {{ nextcloud_data_path }}/data:/var/www/html/data
+                - {{ nextcloud_data_path }}/config:/var/www/html/config
+                - {{ nextcloud_data_path }}/custom_apps:/var/www/html/custom_apps
+                - {{ nextcloud_data_path }}/themes:/var/www/html/themes
+                - {{ nextcloud_data_path }}/logs:/var/www/html/data/logs
+                - {{ nextcloud_data_path }}/apache.conf:/etc/apache2/sites-available/000-default.conf
               environment:
                 POSTGRES_HOST: db
-                POSTGRES_DB: nextcloud
-                POSTGRES_USER: nextcloud
-                POSTGRES_PASSWORD: 09876#Pmf
+                POSTGRES_DB: "{{ db_name }}"
+                POSTGRES_USER: "{{ db_user }}"
+                POSTGRES_PASSWORD: "{{ db_password }}"
                 REDIS_HOST: redis
-                NEXTCLOUD_ADMIN_USER: admin
-                NEXTCLOUD_ADMIN_PASSWORD: Skopje#091
-                TRUSTED_PROXIES: 192.168.100.35  # Proxy IP (Nginx Proxy Manager)
+                NEXTCLOUD_ADMIN_USER: "{{ nextcloud_admin_user }}"
+                NEXTCLOUD_ADMIN_PASSWORD: "{{ nextcloud_admin_password }}"
+                TRUSTED_PROXIES: "{{ trusted_proxy }}"
                 OVERWRITEPROTOCOL: https
-                APACHE_SERVER_NAME: cloud.fixsys.org
+                APACHE_SERVER_NAME: "{{ domain_name }}"
                 NEXTCLOUD_TRUSTED_DOMAINS: |
-                  cloud.fixsys.org
-                  192.168.100.40  # Server IP
+                  {{ domain_name }}
+                  {{ server_ip }}
               networks:
                 - proxy_network
               dns:

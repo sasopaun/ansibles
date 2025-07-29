@@ -1,0 +1,14 @@
+---
+# Database configuration
+db_name: nextcloud
+db_user: nextcloud
+db_password: 09876#Pmf
+
+# Nextcloud admin credentials
+nextcloud_admin_user: admin
+nextcloud_admin_password: Skopje#091
+
+# Network configuration
+domain_name: cloud.fixsys.org
+trusted_proxy: 192.168.100.35
+server_ip: 192.168.100.40
