@@ -6,8 +6,8 @@
   vars_files:
     - vault.yml
   vars:
-    docker_user: "{{ ansible_user | default('sasho') }}"
-    nextcloud_data_path: "/home/{{ docker_user }}/cloud"
+    docker_user: "{{ ansible_user | default(default_user) }}"
+    nextcloud_data_path: "{{ install_path }}"
   tasks:
     - name: Update all packages
       dnf:
