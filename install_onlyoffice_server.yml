@@ -1,0 +1,176 @@
+---
+- name: Install Onlyoffice Docker Compose on AlmaLinux/RHEL
+  hosts: alma
+  become: true
+  gather_facts: true
+  vars_files:
+    - onlyvault.yml
+  vars:
+    docker_user: "{{ ansible_user | default(default_user) }}"
+    onlyoffice_data_path: "{{ install_path }}"
+    postgres_password: "{{ db_password }}"
+    jwt_secret: "{{ onlyoffice_jwt_secret }}"
+
+  tasks:
+    - name: Update all packages
+      dnf:
+        name: '*'
+        state: latest
+        update_cache: yes
+
+    - name: Install required packages
+      dnf:
+        name:
+          - nano
+          - wget
+          - git
+          - unzip
+          - qemu-guest-agent
+        state: present
+
+    - name: Add Docker repository
+      command: dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+      args:
+        creates: /etc/yum.repos.d/docker-ce.repo
+
+    - name: Install Docker packages
+      dnf:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: latest
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add current user to docker group
+      user:
+        name: "{{ docker_user }}"
+        groups: docker
+        append: yes
+
+    - name: Test Docker installation
+      command: docker run hello-world
+      register: test_output
+      changed_when: false
+
+    - name: Display test output
+      debug:
+        var: test_output.stdout_lines
+
+    - name: Create ONLYOFFICE directories
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+        mode: "{{ item.mode }}"
+      with_items:
+        - { path: '{{ onlyoffice_data_path }}', mode: '0755' }
+        - { path: '{{ onlyoffice_data_path }}/logs', mode: '0755' }
+        - { path: '{{ onlyoffice_data_path }}/data', mode: '0755' }
+        - { path: '{{ onlyoffice_data_path }}/lib', mode: '0755' }
+        - { path: '{{ onlyoffice_data_path }}/db', mode: '0755' }
+        - { path: '{{ onlyoffice_data_path }}/certs', mode: '0755' }
+
+    - name: Create compose.yaml for ONLYOFFICE
+      copy:
+        dest: "{{ onlyoffice_data_path }}/compose.yaml"
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+        mode: '0644'
+        content: |
+          version: '3.8'
+          services:
+            onlyoffice-documentserver:
+              image: onlyoffice/documentserver:latest
+              container_name: onlyoffice
+              restart: always
+              network_mode: host  # This allows internal LAN access only
+              environment:
+                - JWT_ENABLED=true
+                - JWT_SECRET={{ jwt_secret }}
+                - JWT_HEADER=Authorization
+                - JWT_IN_BODY=true
+                - DB_TYPE=postgres
+                - DB_HOST=localhost
+                - DB_PORT=5432
+                - DB_NAME=onlyoffice
+                - DB_USER=onlyoffice
+                - DB_PWD={{ postgres_password }}
+                - VIRTUAL_HOST={{ internal_domain }}
+              volumes:
+                - ./logs:/var/log/onlyoffice
+                - ./data:/var/www/onlyoffice/Data
+                - ./lib:/var/lib/onlyoffice
+                - ./certs:/certificates
+
+            onlyoffice-postgresql:
+              image: postgres:13
+              container_name: onlyoffice-postgresql
+              restart: always
+              network_mode: host  # This allows internal LAN access only
+              environment:
+                - POSTGRES_DB=onlyoffice
+                - POSTGRES_USER=onlyoffice
+                - POSTGRES_PASSWORD={{ postgres_password }}
+              volumes:
+                - ./db:/var/lib/postgresql/data
+
+    - name: Create configuration guide
+      copy:
+        dest: "{{ onlyoffice_data_path }}/README.md"
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+        mode: '0644'
+        content: |
+          # ONLYOFFICE Document Server Configuration Guide
+
+          ## Internal Access Only Setup
+
+          This ONLYOFFICE Document Server is configured for internal LAN access only.
+          Server address: http://{{ internal_domain }}
+
+          ## Nextcloud Integration
+
+          To connect your Nextcloud instances to this ONLYOFFICE Document Server:
+
+          1. Install the ONLYOFFICE connector app in each Nextcloud instance:
+             - Go to Apps > Office & Text
+             - Find and install "ONLYOFFICE"
+
+          2. Configure the ONLYOFFICE app in Nextcloud:
+             - Go to Settings > ONLYOFFICE
+             - Document Editing Service address: http://{{ internal_domain }}
+             - Secret key: {{ jwt_secret }}
+             - Enable "Advanced server settings"
+             - Check "Enable advanced server connection settings"
+             - Enable JWT Secret (recommended)
+
+          ## Security Notes
+
+          - Server is configured for internal LAN access only
+          - JWT authentication is enabled for secure communication
+          - Each Nextcloud instance must use the same JWT secret
+          - All data is stored locally in the onlyoffice directory
+
+          ## File Locations
+
+          All data is stored in /home/{{ docker_user }}/onlyoffice:
+          - ./logs: Server logs
+          - ./data: Document data
+          - ./lib: Library files
+          - ./db: PostgreSQL database
+          - ./certs: SSL certificates (if needed)
+          - compose.yaml: Docker compose configuration
+
+          ## Testing the Installation
+
+          Visit http://{{ internal_domain }}/healthcheck
+          You should see a JSON response indicating the service status.
