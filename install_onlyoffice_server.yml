@@ -64,6 +64,11 @@
       debug:
         var: test_output.stdout_lines
 
+    - name: Install OpenSSL
+      dnf:
+        name: openssl
+        state: present
+
     - name: Create ONLYOFFICE directories
       file:
         path: "{{ item.path }}"
@@ -78,6 +83,38 @@
         - { path: '{{ onlyoffice_data_path }}/lib', mode: '0755' }
         - { path: '{{ onlyoffice_data_path }}/db', mode: '0755' }
         - { path: '{{ onlyoffice_data_path }}/certs', mode: '0755' }
+
+    - name: Generate SSL private key
+      openssl_privatekey:
+        path: "{{ onlyoffice_data_path }}/certs/onlyoffice.key"
+        size: 2048
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+        mode: '0600'
+
+    - name: Generate SSL CSR
+      openssl_csr:
+        path: "{{ onlyoffice_data_path }}/certs/onlyoffice.csr"
+        privatekey_path: "{{ onlyoffice_data_path }}/certs/onlyoffice.key"
+        common_name: "{{ internal_domain }}"
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+        mode: '0600'
+
+    - name: Generate self-signed SSL certificate
+      openssl_certificate:
+        path: "{{ onlyoffice_data_path }}/certs/onlyoffice.crt"
+        privatekey_path: "{{ onlyoffice_data_path }}/certs/onlyoffice.key"
+        csr_path: "{{ onlyoffice_data_path }}/certs/onlyoffice.csr"
+        provider: selfsigned
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+        mode: '0644'
+
+    - name: Generate DHparam file
+      command: openssl dhparam -out {{ onlyoffice_data_path }}/certs/dhparam.pem 2048
+      args:
+        creates: "{{ onlyoffice_data_path }}/certs/dhparam.pem"
 
     - name: Create compose.yaml for ONLYOFFICE
       copy:
@@ -105,6 +142,11 @@
                 - DB_USER=onlyoffice
                 - DB_PWD={{ postgres_password }}
                 - VIRTUAL_HOST={{ internal_domain }}
+                # HTTPS Configuration
+                - HTTPS_TRUE=true
+                - SSL_CERTIFICATE_PATH=/certificates/onlyoffice.crt
+                - SSL_KEY_PATH=/certificates/onlyoffice.key
+                - SSL_DHPARAM_PATH=/certificates/dhparam.pem
               volumes:
                 - ./logs:/var/log/onlyoffice
                 - ./data:/var/www/onlyoffice/Data
@@ -134,8 +176,16 @@
 
           ## Internal Access Only Setup
 
-          This ONLYOFFICE Document Server is configured for internal LAN access only.
-          Server address: http://{{ internal_domain }}
+          This ONLYOFFICE Document Server is configured for secure HTTPS access.
+          Server address: https://{{ internal_domain }}
+
+          ## SSL Certificate Information
+          Self-signed SSL certificates are automatically generated during installation:
+          - A SSL certificate and private key for secure HTTPS access
+          - DHparam file for enhanced SSL security
+          
+          Note: These are self-signed certificates suitable for testing and internal use.
+          For production use, consider replacing them with certificates from a trusted Certificate Authority.
 
           ## Nextcloud Integration
 
@@ -147,7 +197,7 @@
 
           2. Configure the ONLYOFFICE app in Nextcloud:
              - Go to Settings > ONLYOFFICE
-             - Document Editing Service address: http://{{ internal_domain }}
+             - Document Editing Service address: https://{{ internal_domain }}
              - Secret key: {{ jwt_secret }}
              - Enable "Advanced server settings"
              - Check "Enable advanced server connection settings"
@@ -172,5 +222,5 @@
 
           ## Testing the Installation
 
-          Visit http://{{ internal_domain }}/healthcheck
+          Visit https://{{ internal_domain }}/healthcheck
           You should see a JSON response indicating the service status.
