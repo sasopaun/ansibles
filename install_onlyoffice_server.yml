@@ -64,9 +64,19 @@
       debug:
         var: test_output.stdout_lines
 
-    - name: Install OpenSSL
+    - name: Install OpenSSL and Python dependencies
       dnf:
-        name: openssl
+        name:
+          - openssl
+          - python3-pip
+          - python3-devel
+          - gcc
+          - openssl-devel
+        state: present
+
+    - name: Install Python cryptography package
+      pip:
+        name: cryptography>=1.2.3
         state: present
 
     - name: Create ONLYOFFICE directories
@@ -129,35 +139,57 @@
               image: onlyoffice/documentserver:latest
               container_name: onlyoffice
               restart: always
-              network_mode: host  # This allows internal LAN access only
+              ports:
+                - "443:443"
+                - "80:80"
               environment:
                 - JWT_ENABLED=true
                 - JWT_SECRET={{ jwt_secret }}
                 - JWT_HEADER=Authorization
                 - JWT_IN_BODY=true
+                - JWT_ACCEPT_UNSIGNED=true
+                - JWT_REFUSE_UNAUTHORIZED=false
+                - TRENDS_ENABLED=false
+                - USE_UNAUTHORIZED_STORAGE=true
+                - ALLOWED_HOSTS=*
+                - DOCUMENT_SERVER_PORT_80_TCP_ADDR=localhost
+                - DOCUMENT_SERVER_PORT_80_TCP_PORT=443
+                - DOCUMENT_SERVER_PROTOCOL=https
                 - DB_TYPE=postgres
-                - DB_HOST=localhost
+                - DB_HOST=onlyoffice-postgresql
                 - DB_PORT=5432
                 - DB_NAME=onlyoffice
                 - DB_USER=onlyoffice
                 - DB_PWD={{ postgres_password }}
                 - VIRTUAL_HOST={{ internal_domain }}
+                - WOPI_ALLOWED_HOSTS=*
                 # HTTPS Configuration
                 - HTTPS_TRUE=true
-                - SSL_CERTIFICATE_PATH=/certificates/onlyoffice.crt
-                - SSL_KEY_PATH=/certificates/onlyoffice.key
-                - SSL_DHPARAM_PATH=/certificates/dhparam.pem
+                - SSL_CERTIFICATE_PATH=/var/www/onlyoffice/Data/certs/onlyoffice.crt
+                - SSL_KEY_PATH=/var/www/onlyoffice/Data/certs/onlyoffice.key
+                - SSL_DHPARAM_PATH=/var/www/onlyoffice/Data/certs/dhparam.pem
+                # Additional security settings
+                - ALLOW_CORS_HEADERS=true
+                - USE_UNAUTHORIZED_STORAGE=true
+                # Conversion settings
+                - FILE_UPLOAD_ENABLE_BLANK_DETERMINATION=true
+                - FILE_UPLOAD_SIZE_MAX=102400
+                - FILE_UPLOAD_TIMEOUT=60
+                - MAX_CONVERTER_PROCESSES=5
+                - GENERATE_FONTS=true
+              user: "root"
               volumes:
-                - ./logs:/var/log/onlyoffice
-                - ./data:/var/www/onlyoffice/Data
-                - ./lib:/var/lib/onlyoffice
-                - ./certs:/certificates
+                - ./logs:/var/log/onlyoffice:rw
+                - ./data:/var/www/onlyoffice/Data:rw
+                - ./lib:/var/lib/onlyoffice:rw
+                - ./certs:/var/www/onlyoffice/Data/certs:rw
 
             onlyoffice-postgresql:
               image: postgres:13
               container_name: onlyoffice-postgresql
               restart: always
-              network_mode: host  # This allows internal LAN access only
+              ports:
+                - "5432:5432"
               environment:
                 - POSTGRES_DB=onlyoffice
                 - POSTGRES_USER=onlyoffice
@@ -224,3 +256,56 @@
 
           Visit https://{{ internal_domain }}/healthcheck
           You should see a JSON response indicating the service status.
+
+    - name: Set proper permissions on ONLYOFFICE directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        recurse: yes
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+        mode: "0755"
+      with_items:
+        - "{{ onlyoffice_data_path }}/logs"
+        - "{{ onlyoffice_data_path }}/data"
+        - "{{ onlyoffice_data_path }}/lib"
+        - "{{ onlyoffice_data_path }}/db"
+
+    - name: Create data certs directory
+      file:
+        path: "{{ onlyoffice_data_path }}/data/certs"
+        state: directory
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+        mode: "0755"
+
+    - name: Copy certificates to data directory
+      copy:
+        src: "{{ onlyoffice_data_path }}/certs/{{ item }}"
+        dest: "{{ onlyoffice_data_path }}/data/certs/{{ item }}"
+        remote_src: yes
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+        mode: "0644"
+      with_items:
+        - onlyoffice.crt
+        - onlyoffice.key
+        - dhparam.pem
+
+    - name: Start ONLYOFFICE containers
+      command: docker compose up -d
+      args:
+        chdir: "{{ onlyoffice_data_path }}"
+
+    - name: Wait for services to start
+      pause:
+        seconds: 30
+
+    - name: Check ONLYOFFICE logs
+      command: docker logs onlyoffice
+      register: onlyoffice_logs
+      ignore_errors: yes
+
+    - name: Display ONLYOFFICE logs
+      debug:
+        var: onlyoffice_logs.stdout_lines
