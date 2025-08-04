@@ -152,9 +152,26 @@
                 - TRENDS_ENABLED=false
                 - USE_UNAUTHORIZED_STORAGE=true
                 - ALLOWED_HOSTS=*
+                - VERIFY_PEER_OFF=true
+                - NODE_TLS_REJECT_UNAUTHORIZED=0
+                - CHECK_IP=false
+                - NGINX_DISABLE_SECURECOOKIE=true
                 - DOCUMENT_SERVER_PORT_80_TCP_ADDR=localhost
                 - DOCUMENT_SERVER_PORT_80_TCP_PORT=443
                 - DOCUMENT_SERVER_PROTOCOL=https
+                # Allow all your Nextcloud domains
+                - TRUSTED_DOMAINS={{ trusted_domains | default('*') }}
+                - DOC_SERV_SITE_URL=https://{{ internal_domain }}
+                # Allow connections from all Nextcloud instances
+                - DOC_SERV_CORS_ALLOWED_ORIGINS=*
+                - WOPI_ALLOWED_HOSTS=*
+                # Performance settings for multiple instances
+                - FILE_UPLOAD_MAX_MEMORY=1000000000
+                - METRICS_ENABLED=true
+                - MAX_CONVERTER_PROCESSES=10
+                - APP_METRICS_ENABLED=true
+                - PUPPETEER_CHROMIUM_REVISION=982053
+                - MAX_CONNECTIONS=100
                 - DB_TYPE=postgres
                 - DB_HOST=onlyoffice-postgresql
                 - DB_PORT=5432
@@ -219,21 +236,32 @@
           Note: These are self-signed certificates suitable for testing and internal use.
           For production use, consider replacing them with certificates from a trusted Certificate Authority.
 
-          ## Nextcloud Integration
+          ## Multi-Instance Nextcloud Integration
 
-          To connect your Nextcloud instances to this ONLYOFFICE Document Server:
+          This ONLYOFFICE Document Server is configured to work with multiple Nextcloud instances.
+          For each Nextcloud instance:
 
-          1. Install the ONLYOFFICE connector app in each Nextcloud instance:
+          1. Install the ONLYOFFICE connector app:
              - Go to Apps > Office & Text
              - Find and install "ONLYOFFICE"
 
-          2. Configure the ONLYOFFICE app in Nextcloud:
+          2. Configure the ONLYOFFICE app in each Nextcloud instance:
              - Go to Settings > ONLYOFFICE
              - Document Editing Service address: https://{{ internal_domain }}
              - Secret key: {{ jwt_secret }}
              - Enable "Advanced server settings"
              - Check "Enable advanced server connection settings"
-             - Enable JWT Secret (recommended)
+             - Enable JWT Secret (required for security)
+             - Enable "Open file in the same tab"
+
+          3. Add trusted domains in each Nextcloud instance:
+             - Go to Settings > Administration > General
+             - Under "Trusted Domains", add: {{ internal_domain }}
+
+          4. Performance Recommendations:
+             - For better performance, configure each Nextcloud instance to use Redis
+             - Consider using a load balancer if connecting more than 10 instances
+             - Monitor server resources and adjust MAX_CONVERTER_PROCESSES if needed
 
           ## Security Notes
 
