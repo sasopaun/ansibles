@@ -23,10 +23,6 @@
         get_checksum: no
       register: reboot_required_file
 
-    - name: Reboot the server (if necessary)
-      ansible.builtin.reboot:
-      when: reboot_required_file.stat.exists == true
-
     - name: Remove dependencies that are no longer needed
       ansible.builtin.apt:
         autoremove: yes
@@ -45,39 +41,97 @@
       ansible.builtin.debug:
         var: disk_space.stdout_lines
 
-    - name: Check if docker-compose is installed
-      ansible.builtin.command: which docker-compose
-      register: docker_compose_check
+    - name: Check docker compose version
+      ansible.builtin.command: docker compose version
+      register: docker_compose_version
       ignore_errors: yes
       changed_when: false
 
-    - name: Get list of running docker-compose projects
-      ansible.builtin.shell: |
-        cd / && find / -name docker-compose.y*ml 2>/dev/null
+    - name: Find all compose.yaml files
+      ansible.builtin.find:
+        paths: 
+          - "~"
+          - "/opt"
+        patterns: 
+          - "compose.yaml"
+          - "compose.yml"
+          - "docker-compose.yaml"
+          - "docker-compose.yml"
+        recurse: yes
       register: compose_files
-      changed_when: false
-      when: docker_compose_check.rc == 0
+      vars:
+        ansible_become: no
 
-    - name: Pull latest images for each docker-compose project
+    - name: Pull latest images for each compose project
       ansible.builtin.shell: |
-        cd {{ item | dirname }} && docker-compose pull
+        cd {{ item.path | dirname }} && docker compose pull
       register: pull_output
-      with_items: "{{ compose_files.stdout_lines | default([]) }}"
-      when: docker_compose_check.rc == 0
+      with_items: "{{ compose_files.files }}"
+      when: docker_compose_version.rc == 0 and compose_files.files | length > 0
+      vars:
+        ansible_become: no
       
     - name: Update running containers with latest images
       ansible.builtin.shell: |
-        cd {{ item | dirname }} && docker-compose up -d
+        cd {{ item.path | dirname }} && docker compose up -d
       register: update_output
-      with_items: "{{ compose_files.stdout_lines | default([]) }}"
-      when: docker_compose_check.rc == 0
+      with_items: "{{ compose_files.files }}"
+      when: docker_compose_version.rc == 0 and compose_files.files | length > 0
+      vars:
+        ansible_become: no
+
+    - name: Get container status details
+      ansible.builtin.shell: |
+        cd {{ item.path | dirname }} && docker compose ps
+      register: container_status
+      with_items: "{{ compose_files.files }}"
+      when: docker_compose_version.rc == 0 and compose_files.files | length > 0
+      vars:
+        ansible_become: no
+      changed_when: false
+
+    - name: Display container status
+      ansible.builtin.debug:
+        msg: "Container status for {{ item.item.path | dirname }}:\n{{ item.stdout }}"
+      with_items: "{{ container_status.results }}"
+      when: item.stdout is defined
 
     - name: Remove old/unused Docker images
       ansible.builtin.shell: docker image prune -f
-      when: docker_compose_check.rc == 0
-      
-    - name: Show update results
+      when: docker_compose_version.rc == 0
+      vars:
+        ansible_become: no
+
+    - name: Display update results
       ansible.builtin.debug:
-        msg: "Container updates completed for {{ item | dirname }}"
-      with_items: "{{ compose_files.stdout_lines | default([]) }}"
-      when: docker_compose_check.rc == 0
+        msg: "Updated containers in {{ item.item.path | dirname }}"
+      with_items: "{{ update_output.results }}"
+      when: item.stdout is defined
+
+    - name: Reboot server
+      ansible.builtin.reboot:
+        reboot_timeout: 600  # 10 minutes timeout for reboot
+        pre_reboot_delay: 5  # Wait 5 seconds before rebooting
+        post_reboot_delay: 30  # Wait 30 seconds after reboot
+
+    - name: Wait for server to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Wait for Docker to be ready
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Start containers after reboot
+      ansible.builtin.shell: |
+        cd {{ item.path | dirname }} && docker compose up -d
+      with_items: "{{ compose_files.files }}"
+      when: docker_compose_version.rc == 0 and compose_files.files | length > 0
+      vars:
+        ansible_become: no
+
+    - name: Display final results
+      ansible.builtin.debug:
+        msg: "Started containers in {{ item.item.path | dirname }}"
+      with_items: "{{ update_output.results }}"
+      when: item.stdout is defined
