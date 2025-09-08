@@ -1,0 +1,83 @@
+---
+- hosts: ubuntu
+  gather_facts: yes
+  become: yes
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600  # Consider cache valid for 1 hour
+
+    - name: Perform a distro upgrade
+      ansible.builtin.apt:
+        upgrade: dist
+        force_apt_get: yes  # Use apt-get instead of apt for better stability
+      register: upgrade_output
+      async: 3600  # Allow for a long running upgrade (1 hour)
+      poll: 5  # Check every 5 seconds
+
+    - name: Check if a reboot is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+        get_checksum: no
+      register: reboot_required_file
+
+    - name: Reboot the server (if necessary)
+      ansible.builtin.reboot:
+      when: reboot_required_file.stat.exists == true
+
+    - name: Remove dependencies that are no longer needed
+      ansible.builtin.apt:
+        autoremove: yes
+        autoclean: yes
+
+    - name: Clean apt cache
+      ansible.builtin.apt:
+        clean: yes
+
+    - name: Check available disk space after updates
+      ansible.builtin.shell: df -h /
+      register: disk_space
+      changed_when: false
+
+    - name: Display disk space information
+      ansible.builtin.debug:
+        var: disk_space.stdout_lines
+
+    - name: Check if docker-compose is installed
+      ansible.builtin.command: which docker-compose
+      register: docker_compose_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Get list of running docker-compose projects
+      ansible.builtin.shell: |
+        cd / && find / -name docker-compose.y*ml 2>/dev/null
+      register: compose_files
+      changed_when: false
+      when: docker_compose_check.rc == 0
+
+    - name: Pull latest images for each docker-compose project
+      ansible.builtin.shell: |
+        cd {{ item | dirname }} && docker-compose pull
+      register: pull_output
+      with_items: "{{ compose_files.stdout_lines | default([]) }}"
+      when: docker_compose_check.rc == 0
+      
+    - name: Update running containers with latest images
+      ansible.builtin.shell: |
+        cd {{ item | dirname }} && docker-compose up -d
+      register: update_output
+      with_items: "{{ compose_files.stdout_lines | default([]) }}"
+      when: docker_compose_check.rc == 0
+
+    - name: Remove old/unused Docker images
+      ansible.builtin.shell: docker image prune -f
+      when: docker_compose_check.rc == 0
+      
+    - name: Show update results
+      ansible.builtin.debug:
+        msg: "Container updates completed for {{ item | dirname }}"
+      with_items: "{{ compose_files.stdout_lines | default([]) }}"
+      when: docker_compose_check.rc == 0
