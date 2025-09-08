@@ -142,6 +142,8 @@
               ports:
                 - "443:443"
                 - "80:80"
+              extra_hosts:
+                - "{{ internal_domain }}:127.0.0.1"
               environment:
                 - JWT_ENABLED=true
                 - JWT_SECRET={{ jwt_secret }}
@@ -156,15 +158,24 @@
                 - NODE_TLS_REJECT_UNAUTHORIZED=0
                 - CHECK_IP=false
                 - NGINX_DISABLE_SECURECOOKIE=true
-                - DOCUMENT_SERVER_PORT_80_TCP_ADDR=localhost
+                # Document server connection settings for internal network
+                - DOCUMENT_SERVER_HOST=https://192.168.100.46
+                - DOCUMENT_SERVER_PORT_80_TCP_ADDR=192.168.100.46
                 - DOCUMENT_SERVER_PORT_80_TCP_PORT=443
                 - DOCUMENT_SERVER_PROTOCOL=https
-                # Allow all your Nextcloud domains
-                - TRUSTED_DOMAINS={{ trusted_domains | default('*') }}
-                - DOC_SERV_SITE_URL=https://{{ internal_domain }}
-                # Allow connections from all Nextcloud instances
-                - DOC_SERV_CORS_ALLOWED_ORIGINS=*
+                # Security and access settings for internal network
+                - TRUSTED_DOMAINS=192.168.100.*
+                - DOC_SERV_SITE_URL=https://192.168.100.46
                 - WOPI_ALLOWED_HOSTS=*
+                - DOC_SERV_CORS_ALLOWED_ORIGINS=https://192.168.100.*
+                - ALLOW_PRIVATE_IP_ADDRESS=true
+                # Security settings for internal usage
+                - JWT_ENABLED=true
+                - JWT_ACCEPT_UNSIGNED=false
+                - JWT_REJECT_UNAUTHORIZED=false
+                - VERIFY_PEER_OFF=true
+                - CHECK_IP=false
+                - ALLOW_INTERNAL_CONNECTIONS=true
                 # Performance settings for multiple instances
                 - FILE_UPLOAD_MAX_MEMORY=1000000000
                 - METRICS_ENABLED=true
@@ -195,6 +206,11 @@
                 - MAX_CONVERTER_PROCESSES=5
                 - GENERATE_FONTS=true
               user: "root"
+              healthcheck:
+                test: ["CMD", "curl", "-f", "https://localhost/healthcheck"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
               volumes:
                 - ./logs:/var/log/onlyoffice:rw
                 - ./data:/var/www/onlyoffice/Data:rw
@@ -236,9 +252,11 @@
           Note: These are self-signed certificates suitable for testing and internal use.
           For production use, consider replacing them with certificates from a trusted Certificate Authority.
 
-          ## Multi-Instance Nextcloud Integration
+          ## Multi-Instance Nextcloud Integration (Internal Network)
 
-          This ONLYOFFICE Document Server is configured to work with multiple Nextcloud instances.
+          This ONLYOFFICE Document Server is configured to work with multiple Nextcloud instances
+          over the internal network (192.168.100.0/24).
+
           For each Nextcloud instance:
 
           1. Install the ONLYOFFICE connector app:
@@ -247,12 +265,21 @@
 
           2. Configure the ONLYOFFICE app in each Nextcloud instance:
              - Go to Settings > ONLYOFFICE
-             - Document Editing Service address: https://{{ internal_domain }}
+             - Document Editing Service address: https://192.168.100.46
              - Secret key: {{ jwt_secret }}
              - Enable "Advanced server settings"
              - Check "Enable advanced server connection settings"
              - Enable JWT Secret (required for security)
-             - Enable "Open file in the same tab"
+             - Uncheck "Verify SSL certificate" (since we're using self-signed certificate)
+
+          3. Important: Certificate Setup
+             - Since we're using a self-signed certificate, you need to add it as trusted
+             - On each Nextcloud server, run:
+               ```bash
+               sudo cp {{ onlyoffice_data_path }}/certs/onlyoffice.crt /usr/local/share/ca-certificates/
+               sudo update-ca-certificates
+               ```
+             - Restart your Nextcloud container after adding the certificate
 
           3. Add trusted domains in each Nextcloud instance:
              - Go to Settings > Administration > General
@@ -337,3 +364,33 @@
     - name: Display ONLYOFFICE logs
       debug:
         var: onlyoffice_logs.stdout_lines
+
+    - name: Verify ONLYOFFICE is accessible
+      uri:
+        url: "https://{{ internal_domain }}/healthcheck"
+        validate_certs: no
+        return_content: yes
+      register: health_check
+      until: health_check.status == 200
+      retries: 6
+      delay: 10
+      ignore_errors: yes
+
+    - name: Display health check result
+      debug:
+        var: health_check
+
+    - name: Create public directory for certificate sharing
+      file:
+        path: "{{ onlyoffice_data_path }}/public"
+        state: directory
+        mode: '0755'
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+
+    - name: Copy certificate to public directory
+      copy:
+        src: "{{ onlyoffice_data_path }}/certs/onlyoffice.crt"
+        dest: "{{ onlyoffice_data_path }}/public/onlyoffice.crt"
+        mode: '0644'
+        remote_src: yes

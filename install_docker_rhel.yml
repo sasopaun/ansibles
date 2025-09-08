@@ -61,6 +61,21 @@
       debug:
         var: test_output.stdout_lines
 
+    - name: Create SSL certificates directory
+      file:
+        path: /usr/local/share/ca-certificates
+        state: directory
+        mode: '0755'
+
+    - name: Copy ONLYOFFICE certificate
+      copy:
+        src: "{{ playbook_dir }}/onlyoffice.crt"
+        dest: /usr/local/share/ca-certificates/onlyoffice.crt
+        mode: '0644'
+
+    - name: Update CA certificates
+      command: update-ca-certificates
+
     - name: Set up Nextcloud directory structure with proper permissions
       file:
         path: "{{ item.path }}"
@@ -76,6 +91,19 @@
         - { path: '{{ nextcloud_data_path }}/db', owner: '999', group: '{{ docker_user }}', mode: '0700' }
         - { path: '{{ nextcloud_data_path }}/logs', owner: '33', group: '33', mode: '0775' }
         - { path: '{{ nextcloud_data_path }}/themes', owner: '33', group: '33', mode: '0775' }
+
+    - name: Create PHP configuration for ONLYOFFICE
+      copy:
+        dest: "{{ nextcloud_data_path }}/php.ini"
+        owner: "{{ docker_user }}"
+        group: "{{ docker_user }}"
+        mode: '0664'
+        content: |
+          memory_limit = 512M
+          upload_max_filesize = 1G
+          post_max_size = 1G
+          max_execution_time = 300
+          max_input_time = 300
 
     - name: Create apache.conf file
       copy:
@@ -127,6 +155,7 @@
                 - {{ nextcloud_data_path }}/themes:/var/www/html/themes
                 - {{ nextcloud_data_path }}/logs:/var/www/html/data/logs
                 - {{ nextcloud_data_path }}/apache.conf:/etc/apache2/sites-available/000-default.conf
+                - {{ nextcloud_data_path }}/php.ini:/usr/local/etc/php/conf.d/nextcloud.ini
               environment:
                 POSTGRES_HOST: db
                 POSTGRES_DB: "{{ db_name }}"
@@ -141,6 +170,12 @@
                 NEXTCLOUD_TRUSTED_DOMAINS: |
                   {{ domain_name }}
                   {{ server_ip }}
+                  192.168.100.46
+                # ONLYOFFICE settings
+                ONLYOFFICE_DOCUMENT_SERVER_URL: https://192.168.100.46
+                ONLYOFFICE_JWT_SECRET: "{{ jwt_secret }}"
+                ONLYOFFICE_JWT_HEADER: "Authorization"
+                ONLYOFFICE_VERIFY_PEER_OFF: "true"
               networks:
                 - proxy_network
               dns:
