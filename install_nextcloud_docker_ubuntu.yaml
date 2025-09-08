@@ -1,0 +1,277 @@
+---
+- name: Setup Ubuntu 24.04 with required packages and deploy Nextcloud
+  hosts: ubuntu
+  become: yes
+  vars_files:
+    - nextvault.yml
+    
+  tasks:
+    - name: Update apt package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name: "{{ required_packages }}"
+        state: present
+
+    - name: Check if Docker is already installed
+      command: docker --version
+      register: docker_installed
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+      when: docker_installed.rc != 0
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+      when: docker_installed.rc != 0
+
+    - name: Install Docker
+      apt:
+        name: docker-ce
+        state: present
+        update_cache: yes
+      when: docker_installed.rc != 0
+
+    - name: Check if Docker Compose is already installed
+      command: docker compose version
+      register: docker_compose_installed
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Install Docker Compose plugin
+      apt:
+        name: docker-compose-plugin
+        state: present
+        update_cache: yes
+      when: docker_compose_installed.rc != 0
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add user to docker group
+      user:
+        name: "{{ user_name }}"
+        groups: docker
+        append: yes
+
+    - name: Start and enable qemu-guest-agent
+      systemd:
+        name: qemu-guest-agent
+        state: started
+        enabled: yes
+
+    - name: Enable UFW firewall
+      ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+
+    - name: Allow SSH through UFW
+      ufw:
+        rule: allow
+        port: "{{ ssh_port }}"
+        proto: tcp
+
+    - name: Allow HTTP through UFW
+      ufw:
+        rule: allow
+        port: "{{ http_port }}"
+        proto: tcp
+
+    - name: Allow HTTPS through UFW
+      ufw:
+        rule: allow
+        port: "{{ https_port }}"
+        proto: tcp
+
+    - name: Create spid directory structure
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: "{{ standard_dir_mode }}"
+      loop:
+        - "{{ compose_dir }}"
+        - "{{ compose_dir }}/db"
+
+    - name: Create Nextcloud directories with proper ownership
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ www_data_uid }}"
+        group: "{{ www_data_gid }}"
+        mode: "{{ nextcloud_dir_mode }}"
+      loop:
+        - "{{ compose_dir }}/data"
+        - "{{ compose_dir }}/config"
+        - "{{ compose_dir }}/custom_apps"
+        - "{{ compose_dir }}/themes"
+        - "{{ compose_dir }}/logs"
+
+    - name: Create apache.conf file
+      copy:
+        dest: "{{ compose_dir }}/apache.conf"
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: "{{ config_file_mode }}"
+        content: |
+          <VirtualHost *:80>
+              ServerName {{ domain_name }}
+              DocumentRoot /var/www/html
+              <Directory /var/www/html>
+                  AllowOverride All
+                  Require all granted
+              </Directory>
+              ErrorLog ${APACHE_LOG_DIR}/error.log
+              CustomLog ${APACHE_LOG_DIR}/access.log combined
+          </VirtualHost>
+
+    - name: Create compose.yaml file
+      copy:
+        dest: "{{ compose_dir }}/compose.yaml"
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0644'
+        content: |
+          services:
+            nextcloud:
+              image: {{ nextcloud_image }}
+              container_name: {{ nextcloud_container }}
+              restart: always
+              ports:
+                - "{{ http_port }}:80"      # HTTP (optional, if not fully behind NPM)
+                - "{{ https_port }}:443"    # HTTPS (optional, if not fully behind NPM)
+              depends_on:
+                - db
+                - redis
+              volumes:
+                - {{ compose_dir }}/data:/var/www/html/data
+                - {{ compose_dir }}/config:/var/www/html/config
+                - {{ compose_dir }}/custom_apps:/var/www/html/custom_apps
+                - {{ compose_dir }}/themes:/var/www/html/themes
+                - {{ compose_dir }}/logs:/var/www/html/logs
+                - {{ compose_dir }}/apache.conf:/etc/apache2/sites-available/000-default.conf
+              environment:
+                - POSTGRES_HOST=db
+                - POSTGRES_DB={{ postgres_db }}
+                - POSTGRES_USER={{ postgres_user }}
+                - POSTGRES_PASSWORD={{ postgres_password }}
+                - REDIS_HOST={{ redis_host }}
+                - NEXTCLOUD_ADMIN_USER={{ nextcloud_admin_user }}
+                - NEXTCLOUD_ADMIN_PASSWORD={{ nextcloud_admin_password }}
+                - TRUSTED_PROXIES={{ proxy_ip }}
+                - OVERWRITEPROTOCOL=https
+                - OVERWRITEHOST={{ domain_name }}
+                - APACHE_SERVER_NAME={{ domain_name }}
+                - NEXTCLOUD_TRUSTED_DOMAINS={{ domain_name }} {{ server_ip }}
+                - LOG_TYPE={{ log_type }}
+                - LOG_LEVEL={{ log_level }}
+                - LOG_FILE={{ log_file }}
+                - LOG_FILE_AUDIT={{ log_file_audit }}
+              networks:
+                - {{ network_name }}
+              dns:
+                - {{ primary_dns }}
+                - {{ secondary_dns }}
+            db:
+              image: {{ postgres_image }}
+              container_name: {{ db_container }}
+              restart: always
+              volumes:
+                - {{ compose_dir }}/db:/var/lib/postgresql/data
+              environment:
+                - POSTGRES_DB={{ postgres_db }}
+                - POSTGRES_USER={{ postgres_user }}
+                - POSTGRES_PASSWORD={{ postgres_password }}
+              networks:
+                - {{ network_name }}
+            redis:
+              image: {{ redis_image }}
+              container_name: {{ redis_container }}
+              restart: always
+              networks:
+                - {{ network_name }}
+            cron:
+              image: {{ nextcloud_image }}
+              container_name: {{ cron_container }}
+              restart: always
+              volumes:
+                - {{ compose_dir }}/data:/var/www/html/data
+                - {{ compose_dir }}/config:/var/www/html/config
+                - {{ compose_dir }}/custom_apps:/var/www/html/custom_apps
+                - {{ compose_dir }}/themes:/var/www/html/themes
+                - {{ compose_dir }}/logs:/var/www/html/logs
+              entrypoint: /cron.sh
+              depends_on:
+                - db
+                - redis
+              networks:
+                - {{ network_name }}
+              dns:
+                - {{ primary_dns }}
+                - {{ secondary_dns }}
+          networks:
+            {{ network_name }}:
+              driver: {{ network_driver }}
+
+    - name: Set proper ownership for compose file and main directory
+      file:
+        path: "{{ item }}"
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+      loop:
+        - "{{ compose_dir }}/compose.yaml"
+        - "{{ compose_dir }}/apache.conf"
+
+    - name: Ensure db directory has correct ownership
+      file:
+        path: "{{ compose_dir }}/db"
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        state: directory
+        recurse: yes
+
+    - name: Pull Docker images
+      become_user: "{{ user_name }}"
+      shell: |
+        cd {{ compose_dir }}
+        docker compose pull
+      args:
+        executable: /bin/bash
+
+    - name: Start Docker Compose services
+      become_user: "{{ user_name }}"
+      shell: |
+        cd {{ compose_dir }}
+        docker compose up -d
+      args:
+        executable: /bin/bash
+
+    - name: Display completion message
+      debug:
+        msg: |
+          Setup completed successfully!
+          - All required packages have been installed
+          - Docker and Docker Compose are running
+          - UFW firewall is enabled with HTTP/HTTPS access
+          - Nextcloud services are starting up at {{ compose_dir }}
+          - You may need to log out and back in for docker group changes to take effect
+          
+          Services will be available at:
+          - HTTP: http://{{ ansible_default_ipv4.address }}
+          - HTTPS: https://{{ ansible_default_ipv4.address }}
+          
+          Note: All Nextcloud directories (data, config, custom_apps, themes, logs) are owned by www-data (33:33) with 770 permissions as required by Nextcloud.
