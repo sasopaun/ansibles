@@ -11,6 +11,12 @@
     postgres_password: "{{ db_password }}"
     jwt_secret: "{{ onlyoffice_jwt_secret }}"
 
+  handlers:
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted
+
   tasks:
     - name: Update all packages
       dnf:
@@ -32,6 +38,7 @@
       command: dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
       args:
         creates: /etc/yum.repos.d/docker-ce.repo
+      notify: restart docker
 
     - name: Install Docker packages
       dnf:
@@ -351,6 +358,16 @@
       command: docker compose up -d
       args:
         chdir: "{{ onlyoffice_data_path }}"
+      register: compose_result
+      retries: 3
+      delay: 5
+      until: compose_result.rc == 0
+      ignore_errors: yes
+
+    - name: Check if containers started successfully
+      fail:
+        msg: "Failed to start ONLYOFFICE containers"
+      when: compose_result.rc != 0
 
     - name: Wait for services to start
       pause:

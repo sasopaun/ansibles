@@ -13,7 +13,10 @@
 
     - name: Install required packages
       apt:
-        name: "{{ required_packages }}"
+        name: 
+          - "{{ required_packages }}"
+          - ca-certificates
+          - curl
         state: present
 
     - name: Check if Docker is already installed
@@ -259,6 +262,52 @@
         docker compose up -d
       args:
         executable: /bin/bash
+
+    - name: Wait for Nextcloud to be ready
+      uri:
+        url: "http://localhost/status.php"
+        return_content: yes
+      register: nextcloud_status
+      until: nextcloud_status.status == 200
+      retries: 12
+      delay: 5
+      ignore_errors: yes
+
+    - name: Create directory for ONLYOFFICE certificates
+      file:
+        path: /usr/local/share/ca-certificates
+        state: directory
+        mode: '0755'
+
+    - name: Copy ONLYOFFICE certificate from ONLYOFFICE server
+      copy:
+        src: "{{ onlyoffice_cert_path }}"
+        dest: /usr/local/share/ca-certificates/onlyoffice.crt
+        mode: '0644'
+
+    - name: Update CA certificates
+      command: update-ca-certificates
+
+    - name: Install ONLYOFFICE Connector
+      become_user: "{{ user_name }}"
+      command: docker exec nextcloud php occ app:install onlyoffice
+      ignore_errors: yes
+
+    - name: Configure ONLYOFFICE Connector
+      become_user: "{{ user_name }}"
+      command: >
+        docker exec nextcloud php occ config:system:set onlyoffice
+        --value='{
+          "DocumentServerUrl": "https://{{ onlyoffice_server }}",
+          "DocumentServerInternalUrl": "https://{{ onlyoffice_server }}",
+          "StorageUrl": "https://{{ domain_name }}",
+          "JwtEnabled": true,
+          "JwtSecret": "{{ onlyoffice_jwt_secret }}",
+          "JwtHeader": "Authorization",
+          "cors_allowed": ["{{ onlyoffice_server }}"],
+          "verify_peer_off": true
+        }'
+      ignore_errors: yes
 
     - name: Display completion message
       debug:

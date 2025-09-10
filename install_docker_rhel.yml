@@ -8,6 +8,12 @@
   vars:
     docker_user: "{{ ansible_user | default(default_user) }}"
     nextcloud_data_path: "{{ install_path }}"
+  handlers:
+    - name: reload firewall
+      systemd:
+        name: firewalld
+        state: reloaded
+
   tasks:
     - name: Update all packages
       dnf:
@@ -23,6 +29,7 @@
           - git
           - unzip
           - qemu-guest-agent
+          - dnf-utils
         state: present
 
     - name: Add Docker repository
@@ -61,20 +68,50 @@
       debug:
         var: test_output.stdout_lines
 
+    - name: Install firewall packages
+      dnf:
+        name: firewalld
+        state: present
+
+    - name: Start and enable firewalld
+      systemd:
+        name: firewalld
+        state: started
+        enabled: yes
+
+    - name: Configure firewall for Nextcloud
+      firewalld:
+        port: "{{ item }}"
+        permanent: yes
+        state: enabled
+      with_items:
+        - "80/tcp"
+        - "443/tcp"
+      notify: reload firewall
+
+    - name: Check if ONLYOFFICE certificate exists
+      stat:
+        path: "{{ playbook_dir }}/onlyoffice.crt"
+      register: cert_file
+      delegate_to: localhost
+
     - name: Create SSL certificates directory
       file:
-        path: /usr/local/share/ca-certificates
+        path: /etc/pki/ca-trust/source/anchors
         state: directory
         mode: '0755'
+      when: cert_file.stat.exists
 
     - name: Copy ONLYOFFICE certificate
       copy:
         src: "{{ playbook_dir }}/onlyoffice.crt"
-        dest: /usr/local/share/ca-certificates/onlyoffice.crt
+        dest: /etc/pki/ca-trust/source/anchors/onlyoffice.crt
         mode: '0644'
+      when: cert_file.stat.exists
 
-    - name: Update CA certificates
-      command: update-ca-certificates
+    - name: Update CA certificates (RHEL/AlmaLinux)
+      command: update-ca-trust extract
+      when: cert_file.stat.exists
 
     - name: Set up Nextcloud directory structure with proper permissions
       file:
@@ -123,12 +160,9 @@
                   Require all granted
               </Directory>
 
-              ErrorLog ${APACHE_LOG_DIR}/error.log
-              CustomLog ${APACHE_LOG_DIR}/access.log combined
+              ErrorLog /var/log/apache2/error.log
+              CustomLog /var/log/apache2/access.log combined
           </VirtualHost>
-        owner: "{{ docker_user }}"
-        group: "{{ docker_user }}"
-        mode: '0664'
 
     - name: Create docker-compose.yaml for Nextcloud
       copy:
@@ -140,11 +174,11 @@
           services:
             nextcloud:
               image: nextcloud:latest
-              container_name: cloud
+              container_name: "{{ container_name | default('nextcloud') }}"
               restart: always
               ports:
-                - "80:80"
-                - "443:443"
+                - "{{ http_port | default('80') }}:80"
+                - "{{ https_port | default('443') }}:443"
               depends_on:
                 - db
                 - redis
@@ -172,10 +206,11 @@
                   {{ server_ip }}
                   192.168.100.46
                 # ONLYOFFICE settings
-                ONLYOFFICE_DOCUMENT_SERVER_URL: https://192.168.100.46
+                ONLYOFFICE_DOCUMENT_SERVER_URL: "{{ onlyoffice_server_url }}"
                 ONLYOFFICE_JWT_SECRET: "{{ jwt_secret }}"
                 ONLYOFFICE_JWT_HEADER: "Authorization"
-                ONLYOFFICE_VERIFY_PEER_OFF: "true"
+                ONLYOFFICE_VERIFY_PEER_OFF: "{{ onlyoffice_verify_peer_off | default('true') }}"
+                TRUSTED_DOMAINS: "{{ trusted_domains | default(domain_name + ',' + server_ip) }}"
               networks:
                 - proxy_network
               dns:
@@ -230,3 +265,28 @@
           networks:
             proxy_network:
               driver: bridge
+
+    - name: Wait for Nextcloud to be ready
+      uri:
+        url: "http://localhost/status.php"
+        return_content: yes
+      register: nextcloud_status
+      until: nextcloud_status.status == 200
+      retries: 12
+      delay: 5
+      ignore_errors: yes
+
+    - name: Verify ONLYOFFICE connection
+      uri:
+        url: "{{ onlyoffice_server_url }}/healthcheck"
+        validate_certs: "{{ not (onlyoffice_verify_peer_off | default(true)) }}"
+        return_content: yes
+      register: onlyoffice_check
+      until: onlyoffice_check.status == 200
+      retries: 6
+      delay: 10
+      ignore_errors: yes
+
+    - name: Display ONLYOFFICE connection status
+      debug:
+        msg: "ONLYOFFICE connection status: {{ 'OK' if onlyoffice_check.status == 200 else 'Failed' }}"
